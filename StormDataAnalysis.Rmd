@@ -1,0 +1,185 @@
+---
+title: "Reproducible Research. Project 2"
+author: "Nadia Stavisky"
+date: "7/28/2019"
+output: 
+  html_document:
+    keep_md: true
+
+---
+
+```{r global.options, include = FALSE, echo=FALSE}
+#load library 'knitr', set a golobal default options:
+library(rmarkdown)
+library(knitr)
+library(ggplot2)
+library(formatR)
+library(dplyr)
+library(tidyr)
+library(e1071)
+library(lubridate)
+
+opts_chunk$set(
+    echo = TRUE, # if FALSE knitr will not display code in the code chunk above it's results
+    cache = FALSE, # if TRUE knitr will cache the results to reuse in future knits
+    fig.width   = 10, # the width for plots created by code chunk
+    fig.height  = 5, # the height for plots created by code chunk
+    fig.align   = 'center', # how to align graphics in the final doc. 'left', 'right', 'center'
+    fig.path    = 'figs/',  # file path to the directory where knitr shall store the graphics files
+    #results     = 'asis',   # knitr will pass through results without reformatting them
+    tidy = TRUE,
+    tidy.opts=list(width.cutoff=60),
+    strip.white = TRUE)     # if FALSE knitr will not remove white spaces at the beg or end of code chunk
+```
+
+### The weather events analysis of impact on US population health and economic.
+
+##Introduction
+Storms and other severe weather events can cause both public health and economic problems for communities and municipalities. Many severe events can result in fatalities, injuries, and property damage, and preventing such outcomes to the extent possible is a key concern.
+
+This project involves exploring the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database. This database tracks characteristics of major storms and weather events in the United States, including when and where they occur, as well as estimates of any fatalities, injuries, and property damage.
+
+The events in the database start in the year 1950 and end in November 2011. In the earlier years of the database there are generally fewer events recorded, most likely due to a lack of good records. More recent years should be considered more complete.
+
+##Data Processing
+
+The Data for this analysis loaded from [Storm Data](https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2)
+
+```{r}
+#loading data using the link, reading data into "data" - R object:
+datapath <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+download.file(datapath, destfile = "./StormData.csv.bz2")
+data <- read.csv2("StormData.csv.bz2", header = TRUE, sep = ",")
+```
+
+data dimensions and structure:
+```{r}
+dim(data)
+str(data)
+summary(data)
+```
+
+Subsetting data, selecting columns that are contain information:
+1. EVTYPE - event type (factor);
+2. FATALITIES - number of recorded fatalities;
+3. INJURIES - number of recorded injuries;
+4. PROPDMG - Property damage estimates;
+5. PROPDMGEXP - magnitude of PROPDMG ( “K” for thousands, “M” for millions, and “B” for billions etc.);
+6. CROPDMG - crop damage estimates;
+7. CROPDMGEXP - magnitude of CROPDMG ( “K” for thousands, “M” for millions, and “B” for billions etc.);
+
+
+```{r}
+subsetdata <- data[,c("BGN_DATE", "REFNUM","EVTYPE", "FATALITIES", "INJURIES", "PROPDMG", "PROPDMGEXP", "CROPDMG", "CROPDMGEXP")]
+```
+working dataset:
+```{r}
+data1 <- subsetdata
+```
+
+```{r}
+head(data1)
+```
+Data transformation:
+
+transform "FATALITIES", "INJURIES", "PROPDMG", "CROPDMG" from factors in to numeric:
+```{r}
+numcol <- c("FATALITIES", "INJURIES", "PROPDMG", "CROPDMG")
+data1[, numcol] <- mutate_if(data1[,numcol], is.factor, as.character)
+data1[, numcol] <- sapply(data1[,numcol], as.numeric)
+```
+transform BGN_DATE from factors to dates
+```{r}
+data1$BGN_DATE <- mdy_hms(data1$BGN_DATE)
+data1$BGN_DATE <- year(data1$BGN_DATE)
+```
+
+Standartize magnitude codes used in the dataset:
+```{r}
+levels(data1$PROPDMGEXP)
+levels(data1$CROPDMGEXP)
+```
+
+```{r}
+#create df for PROPDMGEXP$CROPDMGEXP recoding:
+DMGEXPlevels <- unique(as.character(c(levels(data1$PROPDMGEXP), levels(data1$CROPDMGEXP))))
+DMGEXPint <- c(1,  1, 1, 1, 1, 1, 10^2, 10^3, 10^4, 10^5, 10^6, 10^7, 10^8, 10^9, 10^2, 10^2, 10^3, 10^6, 10^6, 10^3)
+PMGTDdf <- cbind("PROPDMGEXP" = DMGEXPlevels, "PDMGEXPint" = DMGEXPint)
+CMGTDdf <- cbind("CROPDMGEXP" = DMGEXPlevels, "CDMGEXPint" = DMGEXPint)
+```
+
+```{r}
+#create data set to use in visual analysis 
+data2 <- merge(data1, PMGTDdf, by = "PROPDMGEXP", all.x = TRUE)
+data2 <- merge(data2, CMGTDdf, by = "CROPDMGEXP", all.x = TRUE)
+data2$PROPDMGB <- (data2$PROPDMG*as.numeric(as.character(data2$PDMGEXPint)))/1e9
+data2$CROPDMGB <- (data2$CROPDMG*as.numeric(as.character(data2$CDMGEXPint)))/1e9
+data2$DMGEXPB <- data2$PROPDMGB + data2$CROPDMGB
+data2$TTLHARM <- data2$FATALITIES + data2$INJURIES
+```
+```{r}
+str(data2)
+```
+##Results
+
+#Top weather events associated with greatest health harm.
+
+Weather events grouped as:
+- Fatalities;
+- Injuries;
+- Fatalities + Injuries = Total Health Harm;
+```{r}
+healthplot <- data2 %>%
+  subset(select = c(EVTYPE, FATALITIES, INJURIES, TTLHARM)) %>%
+  gather(HealthDMGType, Value, c(FATALITIES, INJURIES, TTLHARM)) %>%
+  group_by(HealthDMGType, EVTYPE) %>% 
+  summarize(sum_health_harm_K = sum(Value)/1000) %>%
+  arrange(desc(sum_health_harm_K)) %>%
+  group_by(HealthDMGType) %>%
+  slice(1:10)
+```
+
+```{r}
+healthplot$HealthDMGType <- factor(healthplot$HealthDMGType, levels = c("FATALITIES", "INJURIES", "TTLHARM"), labels = c("Fatalities", "Injuries", "Total"))
+a <- ggplot(data = healthplot, aes(x = reorder(EVTYPE, -sum_health_harm_K, sum), y = sum_health_harm_K, fill = HealthDMGType))
+a + geom_bar( stat = "identity") + facet_grid(HealthDMGType ~., scales = "free") +
+  geom_text(aes(label = sum_health_harm_K), size = 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_discrete(name = "Health demadge type",labels = c("Fatalities", "Injuries", "Fatalities + Injuries"))  +
+  labs(title="Total Fatalities & Injuries", x = "", y = "Number of injuries, K") 
+```
+# Summary. Top 5 weather events cused greatest health harm.
+```{r}
+healthplot %>% spread(HealthDMGType, sum_health_harm_K) %>% arrange(desc(Total)) %>% head(5)
+```
+
+# Top weather types of events with the greatest economic consequences.
+
+Event types grouped by:
+- Property damadge;
+- Crop damadge;
+- Property damadge + Crop damadge = Total Economic Damadge.
+
+```{r}
+econplot <- data2 %>%
+  subset(select = c(EVTYPE, PROPDMGB, CROPDMGB, DMGEXPB)) %>%
+  gather(EconDMGType, Value, c(PROPDMGB, CROPDMGB, DMGEXPB)) %>%
+  group_by(EconDMGType, EVTYPE) %>% 
+  summarize(sum_econ_harm_B = sum(Value)) %>%
+  arrange(desc(sum_econ_harm_B)) %>%
+  group_by(EconDMGType) %>%
+  slice(1:10)
+```
+```{r}
+econplot$EconDMGType <- factor(econplot$EconDMGType, levels = c("PROPDMGB", "CROPDMGB", "DMGEXPB"), labels = c("Property", "Crop", "Total"))
+a <- ggplot(data = econplot, aes(x = reorder(EVTYPE, -sum_econ_harm_B, sum), y = sum_econ_harm_B, fill = EconDMGType))
+a + geom_bar( stat = "identity") + facet_grid(EconDMGType ~., scales = "free") +
+  geom_text(aes(label = round(sum_econ_harm_B, digits = 1) ), size = 3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_discrete(name = "Economic demadge type",labels = c("Propertiy damadge", "Crop damadge", "Total economic damadge"))  +
+  labs(title="Total Economic Damadge (property & crop)", x = "", y = "US $ Billions") 
+```
+# Summary. Top 5 weather events cused greatest economic harm.
+```{r}
+econplot %>% spread(EconDMGType, sum_econ_harm_B) %>% arrange(desc(Total)) %>% head(5)
+```
